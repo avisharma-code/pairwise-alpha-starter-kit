@@ -75,9 +75,12 @@ def fetch_all(symbols_with_timeframes, start_time, end_time):
 if __name__ == "__main__":
     # Define symbols and timeframes
     symbols_with_timeframes = {
-        "target_ltc": ("LTCUSDT", "1h"),
-        "anchor_btc": ("BTCUSDT", "1h")
+    "target_ltc": ("LTCUSDT", "1h"),
+    "anchor_btc": ("BTCUSDT", "1h"),
+    "anchor_eth": ("ETHUSDT", "1h"),
+    "anchor_sol": ("SOLUSDT", "1h"),
     }
+
 
     # Define strict time window
     START_DATE = "2025-01-01 00:00:00"
@@ -88,5 +91,6 @@ if __name__ == "__main__":
 
     data['target_ltc'].to_csv("LTC_1H.csv", index=False)
     data['anchor_btc'].to_csv("BTC_1H.csv", index=False)
-
+    data['anchor_eth'].to_csv("ETH_1H.csv", index=False)
+    data['anchor_sol'].to_csv("SOL_1H.csv", index=False)
     print("Data saved")
