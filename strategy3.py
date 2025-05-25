@@ -29,9 +29,9 @@ def evaluate_trade_conditions(row, vol_threshold: float) -> str:
     return 'HOLD'
 
 
-def generate_signals(candles_target: pd.DataFrame, candles_anchor: pd.DataFrame) -> pd.DataFrame:
+def generate_signals(candles_target: pd.DataFrame, candles_anchor_4h: pd.DataFrame) -> pd.DataFrame:
     """
-    Strategy v2.6A – Lagged Anchor Entry (1H) with Position Sizing
+    Strategy v2.6B – Lagged Anchor Entry (1H LTC, 4H Anchors)
     """
     try:
         df = candles_target.copy()
@@ -40,8 +40,15 @@ def generate_signals(candles_target: pd.DataFrame, candles_anchor: pd.DataFrame)
         df['ltc_vol'] = df['close'].rolling(14).std()
         vol_threshold = df['ltc_vol'].quantile(0.85)
 
-        df_anchor = compute_anchor_scores(candles_anchor.copy(), lookback=2)
-        df = df.merge(df_anchor, on="timestamp", how="inner")
+        # Downsample 1H target timestamps to align with 4H anchor
+        df['rounded_ts'] = df['timestamp'].dt.floor('4H')
+        candles_anchor_4h['timestamp'] = pd.to_datetime(candles_anchor_4h['timestamp'])
+        df_anchor = compute_anchor_scores(candles_anchor_4h.copy(), lookback=2)
+
+        # Rename to avoid duplicate timestamp column on merge
+        df_anchor = df_anchor.rename(columns={'timestamp': 'rounded_ts'})
+        df = df.merge(df_anchor, on="rounded_ts", how="inner")
+
         df['signal'] = 'HOLD'
         df['position_size'] = 1.0  # Default full position
 
@@ -73,7 +80,6 @@ def generate_signals(candles_target: pd.DataFrame, candles_anchor: pd.DataFrame)
                     entry_price = price_now
                     last_signal = action
                     holding = 1
-                    # Position size scaled by average score magnitude
                     score_mag = max(abs(df.at[i, 'score_BTC']), abs(df.at[i, 'score_ETH']))
                     df.at[i, 'position_size'] = min(1.0, max(0.25, score_mag / 0.01))
 
@@ -90,7 +96,7 @@ def get_coin_metadata() -> dict:
     return {
         "target": {"symbol": "LTC", "timeframe": "1H"},
         "anchors": [
-            {"symbol": "BTC", "timeframe": "1H"},
-            {"symbol": "ETH", "timeframe": "1H"}
+            {"symbol": "BTC", "timeframe": "4H"},
+            {"symbol": "ETH", "timeframe": "4H"}
         ]
     }

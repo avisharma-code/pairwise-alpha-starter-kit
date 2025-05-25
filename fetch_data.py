@@ -75,10 +75,10 @@ def fetch_all(symbols_with_timeframes, start_time, end_time):
 if __name__ == "__main__":
     # Define symbols and timeframes
     symbols_with_timeframes = {
-    "target_ltc": ("LTCUSDT", "1h"),
-    "anchor_btc": ("BTCUSDT", "1h"),
-    "anchor_eth": ("ETHUSDT", "1h"),
-    "anchor_sol": ("SOLUSDT", "1h"),
+    "target_ltc": ("LTCUSDT", "4h"),
+    "anchor_btc": ("BTCUSDT", "4h"),
+    "anchor_eth": ("ETHUSDT", "4h"),
+    "anchor_sol": ("SOLUSDT", "4h"),
     }
 
 
@@ -89,8 +89,8 @@ if __name__ == "__main__":
     # Fetch and save
     data = fetch_all(symbols_with_timeframes, START_DATE, END_DATE)
 
-    data['target_ltc'].to_csv("LTC_1H.csv", index=False)
-    data['anchor_btc'].to_csv("BTC_1H.csv", index=False)
-    data['anchor_eth'].to_csv("ETH_1H.csv", index=False)
-    data['anchor_sol'].to_csv("SOL_1H.csv", index=False)
+    data['target_ltc'].to_csv("LTC_4H.csv", index=False)
+    data['anchor_btc'].to_csv("BTC_4H.csv", index=False)
+    data['anchor_eth'].to_csv("ETH_4H.csv", index=False)
+    data['anchor_sol'].to_csv("SOL_4H.csv", index=False)
     print("Data saved")
