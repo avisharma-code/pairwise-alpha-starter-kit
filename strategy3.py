@@ -1,102 +1,78 @@
 import pandas as pd
 import numpy as np
 
-
-def compute_anchor_scores(df_anchor: pd.DataFrame, lookback: int = 2) -> pd.DataFrame:
-    for coin in ['BTC', 'ETH']:
-        close_col = f'close_{coin}'
-        df_anchor[f'ret_{coin}'] = df_anchor[close_col].pct_change(lookback)
-        df_anchor[f'vol_{coin}'] = df_anchor[close_col].rolling(14).std()
-        df_anchor[f'score_{coin}'] = df_anchor[f'ret_{coin}'] / df_anchor[f'vol_{coin}']
-    return df_anchor
-
-
-def evaluate_trade_conditions(row, vol_threshold: float) -> str:
-    score_btc = row['score_BTC']
-    score_eth = row['score_ETH']
-    ltc_ret = row['ltc_return']
-    ltc_vol = row['ltc_vol']
-
-    anchor_pump = (score_btc > 0.002 or score_eth > 0.002)
-    anchor_dump = (score_btc < -0.002 or score_eth < -0.002)
-    calm_market = ltc_vol <= vol_threshold
-    lagging_ltc = abs(ltc_ret) < max(row['ret_BTC'], row['ret_ETH'])
-
-    if anchor_pump and calm_market and lagging_ltc:
-        return 'BUY'
-    elif anchor_dump and calm_market and lagging_ltc:
-        return 'SELL'
-    return 'HOLD'
-
-
-def generate_signals(candles_target: pd.DataFrame, candles_anchor_4h: pd.DataFrame) -> pd.DataFrame:
+def generate_signals(candles_target: pd.DataFrame, candles_anchor: pd.DataFrame) -> pd.DataFrame:
     """
-    Strategy v2.6B – Lagged Anchor Entry (1H LTC, 4H Anchors)
+    Clean Momentum Strategy v9.1
+    - Simplified yet effective signal logic
+    - Robust column handling
+    - Adaptive risk management
+    - Competition date compliance
     """
     try:
-        df = candles_target.copy()
-        df['atr'] = (df['high'] - df['low']).rolling(14).mean()
-        df['ltc_return'] = df['close'].pct_change(3)
-        df['ltc_vol'] = df['close'].rolling(14).std()
-        vol_threshold = df['ltc_vol'].quantile(0.85)
+        # Proper column renaming
+        ltc_cols = {
+            'open': 'open_LTC', 'high': 'high_LTC',
+            'low': 'low_LTC', 'close': 'close_LTC',
+            'volume': 'volume_LTC'
+        }
+        df = candles_target.rename(columns=ltc_cols)
+        df = df.merge(candles_anchor, on='timestamp', how='inner')
+        
+        # Convert and filter dates
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df[(df['timestamp'] >= '2025-01-01') & 
+               (df['timestamp'] <= '2025-05-09')].copy()
 
-        # Downsample 1H target timestamps to align with 4H anchor
-        df['rounded_ts'] = df['timestamp'].dt.floor('4H')
-        candles_anchor_4h['timestamp'] = pd.to_datetime(candles_anchor_4h['timestamp'])
-        df_anchor = compute_anchor_scores(candles_anchor_4h.copy(), lookback=2)
+        # Core indicators
+        df['atr'] = (df['high_LTC'] - df['low_LTC']).rolling(14).mean()
+        df['btc_mom'] = df['close_BTC'].pct_change(4)
+        df['eth_mom'] = df['close_ETH'].pct_change(4)
+        df['ltc_break'] = df['close_LTC'] > df['high_LTC'].shift(1)
 
-        # Rename to avoid duplicate timestamp column on merge
-        df_anchor = df_anchor.rename(columns={'timestamp': 'rounded_ts'})
-        df = df.merge(df_anchor, on="rounded_ts", how="inner")
-
+        # Signal logic
         df['signal'] = 'HOLD'
-        df['position_size'] = 1.0  # Default full position
-
-        TP_MULT = 2.5
-        SL_MULT = 1.2
-        holding = 0
-        entry_price = None
-        last_signal = "HOLD"
-        max_hold = 18
-
-        for i in range(len(df)):
-            price_now = df.at[i, 'close']
-            atr_now = df.at[i, 'atr']
-
-            if holding > 0:
-                holding += 1
-                change = price_now / entry_price - 1
-                if (change >= TP_MULT * atr_now / entry_price) or (change <= -SL_MULT * atr_now / entry_price) or holding >= max_hold:
-                    df.at[i, 'signal'] = 'SELL' if last_signal == 'BUY' else 'BUY'
-                    holding = 0
-                    last_signal = 'HOLD'
-                    continue
-                else:
-                    df.at[i, 'signal'] = 'HOLD'
+        in_trade = False
+        entry_price = 0
+        trail_stop = 0
+        
+        for i in range(4, len(df)):
+            current_close = df.at[i, 'close_LTC']
+            atr = df.at[i, 'atr']
+            
+            if not in_trade:
+                # Clear entry condition
+                if (df.at[i, 'btc_mom'] > 0.005 and 
+                    df.at[i, 'eth_mom'] > 0.004 and
+                    df.at[i, 'ltc_break'] and
+                    atr < 0.02 * current_close):
+                    
+                    df.at[i, 'signal'] = 'BUY'
+                    entry_price = current_close
+                    trail_stop = entry_price - 2 * atr
+                    in_trade = True
             else:
-                action = evaluate_trade_conditions(df.iloc[i], vol_threshold)
-                if action != 'HOLD':
-                    df.at[i, 'signal'] = action
-                    entry_price = price_now
-                    last_signal = action
-                    holding = 1
-                    score_mag = max(abs(df.at[i, 'score_BTC']), abs(df.at[i, 'score_ETH']))
-                    df.at[i, 'position_size'] = min(1.0, max(0.25, score_mag / 0.01))
+                # Progressive trailing stop
+                trail_stop = max(trail_stop, current_close - 1.5 * atr)
+                
+                # Exit conditions
+                if current_close < trail_stop:
+                    df.at[i, 'signal'] = 'SELL'
+                    in_trade = False
+                elif (current_close / entry_price) >= 1.04:  # 4% profit target
+                    df.at[i, 'signal'] = 'SELL'
+                    in_trade = False
 
-        print("\n🔍 Preview – Anchor Scores & Volatility")
-        print(df[['timestamp', 'score_BTC', 'score_ETH', 'ltc_return', 'ltc_vol', 'signal', 'position_size']].tail(20))
-
-        return df[['timestamp', 'signal', 'position_size']]
+        return df[['timestamp', 'signal']]
 
     except Exception as e:
-        raise RuntimeError(f"Error in generate_signals: {e}")
-
+        raise RuntimeError(f"Signal error: {str(e)}")
 
 def get_coin_metadata() -> dict:
     return {
         "target": {"symbol": "LTC", "timeframe": "1H"},
         "anchors": [
-            {"symbol": "BTC", "timeframe": "4H"},
-            {"symbol": "ETH", "timeframe": "4H"}
+            {"symbol": "BTC", "timeframe": "1H"},
+            {"symbol": "ETH", "timeframe": "1H"}
         ]
     }

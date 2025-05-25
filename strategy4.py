@@ -1,102 +1,98 @@
 import pandas as pd
 import numpy as np
 
-
-def compute_anchor_scores(df_anchor: pd.DataFrame, lookback: int = 2) -> pd.DataFrame:
-    for coin in ['BTC', 'ETH']:
-        close_col = f'close_{coin}'
-        df_anchor[f'ret_{coin}'] = df_anchor[close_col].pct_change(lookback)
-        df_anchor[f'vol_{coin}'] = df_anchor[close_col].rolling(14).std()
-        df_anchor[f'score_{coin}'] = df_anchor[f'ret_{coin}'] / df_anchor[f'vol_{coin}']
-    return df_anchor
-
-
-def evaluate_trade_conditions(row, vol_threshold: float, ltc_trend_thresh: float = 0.002) -> str:
-    score_btc = row['score_BTC']
-    score_eth = row['score_ETH']
-    ltc_ret = row['ltc_return']
-    ltc_vol = row['ltc_vol']
-    ltc_trend = row['ltc_trend']
-
-    anchor_pump = (score_btc > 0.002 or score_eth > 0.002)
-    anchor_dump = (score_btc < -0.002 or score_eth < -0.002)
-    calm_market = ltc_vol <= vol_threshold
-    lagging_ltc = abs(ltc_ret) < max(row['ret_BTC'], row['ret_ETH'])
-    neutral_ltc_trend = abs(ltc_trend) < ltc_trend_thresh
-
-    if anchor_pump and calm_market and lagging_ltc and neutral_ltc_trend:
-        return 'BUY'
-    elif anchor_dump and calm_market and lagging_ltc and neutral_ltc_trend:
-        return 'SELL'
-    return 'HOLD'
-
-
-def generate_signals(candles_target: pd.DataFrame, candles_anchor_4h: pd.DataFrame) -> pd.DataFrame:
+def generate_signals(candles_target: pd.DataFrame, candles_anchor: pd.DataFrame) -> pd.DataFrame:
     """
-    Strategy v2.6C – Lagged Anchor Entry (1H LTC, 4H Anchors, with LTC Microtrend Filter)
+    Adaptive Momentum Strategy v5.1
+    - Dual timeframe momentum confirmation
+    - Volatility-scaled position sizing
+    - Dynamic stop-loss system
+    - Market regime filtering
     """
     try:
-        df = candles_target.copy()
-        df['atr'] = (df['high'] - df['low']).rolling(14).mean()
-        df['ltc_return'] = df['close'].pct_change(3)
-        df['ltc_vol'] = df['close'].rolling(14).std()
-        df['ltc_trend'] = df['close'].pct_change(2).rolling(3).mean()
-        vol_threshold = df['ltc_vol'].quantile(0.85)
+        # Standardize column names
+        cols = {
+            "open": "open_LTC",
+            "high": "high_LTC",
+            "low": "low_LTC",
+            "close": "close_LTC",
+            "volume": "volume_LTC"  # Critical fix
+        }
+        df = candles_target.rename(columns=cols).merge(
+            candles_anchor, on="timestamp", how="inner")
 
-        df['rounded_ts'] = df['timestamp'].dt.floor('4H')
-        candles_anchor_4h['timestamp'] = pd.to_datetime(candles_anchor_4h['timestamp'])
-        df_anchor = compute_anchor_scores(candles_anchor_4h.copy(), lookback=2)
-        df_anchor = df_anchor.rename(columns={'timestamp': 'rounded_ts'})
-        df = df.merge(df_anchor, on="rounded_ts", how="inner")
+        # Calculate volatility metrics
+        df['atr'] = (df['high_LTC'] - df['low_LTC']).rolling(14).mean()
+        df['volatility_ratio'] = (df['atr'] / df['close_LTC'].shift(1)).clip(0.005, 0.04)
+        
+        # Market regime filter (200-period MA)
+        df['ma_200'] = df['close_LTC'].rolling(200).mean()
+        
+        # Anchor momentum system
+        for coin in ['BTC', 'ETH']:
+            df[f'{coin}_mom_4h'] = df[f'close_{coin}'].pct_change(4)
+            df[f'{coin}_mom_24h'] = df[f'close_{coin}'].pct_change(24)
+        
+        # Volume confirmation
+        df['volume_z'] = (df['volume_LTC'] - df['volume_LTC'].rolling(50).mean()) / df['volume_LTC'].rolling(50).std()
 
+        # Signal generation logic
         df['signal'] = 'HOLD'
-        df['position_size'] = 1.0
+        in_position = False
+        entry_price = 0
+        trail_stop = 0
+        position_size = 0
 
-        TP_MULT = 2.5
-        SL_MULT = 1.2
-        holding = 0
-        entry_price = None
-        last_signal = "HOLD"
-        max_hold = 18
+        for i in range(2, len(df)):
+            current_close = df.at[i, 'close_LTC']
+            current_vol = df.at[i, 'volatility_ratio']
+            
+            # Only trade in bullish regimes
+            if df.at[i, 'close_LTC'] < df.at[i, 'ma_200']:
+                continue
+                
+            if not in_position:
+                # Entry conditions
+                anchor_ok = (df.at[i, 'BTC_mom_4h'] > 0.005) & \
+                            (df.at[i, 'ETH_mom_4h'] > 0.004)
+                price_confirm = current_close > df.at[i-1, 'high_LTC']
+                vol_ok = current_vol < 0.02
+                volume_ok = df.at[i, 'volume_z'] > 0.5
 
-        for i in range(len(df)):
-            price_now = df.at[i, 'close']
-            atr_now = df.at[i, 'atr']
-
-            if holding > 0:
-                holding += 1
-                change = price_now / entry_price - 1
-                if (change >= TP_MULT * atr_now / entry_price) or (change <= -SL_MULT * atr_now / entry_price) or holding >= max_hold:
-                    df.at[i, 'signal'] = 'SELL' if last_signal == 'BUY' else 'BUY'
-                    holding = 0
-                    last_signal = 'HOLD'
-                    continue
-                else:
-                    df.at[i, 'signal'] = 'HOLD'
+                if anchor_ok and price_confirm and vol_ok and volume_ok:
+                    # Dynamic position sizing
+                    risk_capital = 1000 * 0.015  # 1.5% risk per trade
+                    position_size = risk_capital / (df.at[i, 'atr'] * 2)
+                    
+                    df.at[i, 'signal'] = 'BUY'
+                    entry_price = current_close
+                    trail_stop = entry_price - (df.at[i, 'atr'] * 1.5)
+                    in_position = True
             else:
-                action = evaluate_trade_conditions(df.iloc[i], vol_threshold)
-                if action != 'HOLD':
-                    df.at[i, 'signal'] = action
-                    entry_price = price_now
-                    last_signal = action
-                    holding = 1
-                    score_mag = max(abs(df.at[i, 'score_BTC']), abs(df.at[i, 'score_ETH']))
-                    df.at[i, 'position_size'] = min(1.0, max(0.25, score_mag / 0.01))
+                # Dynamic exit management
+                unrealized_pct = (current_close / entry_price - 1) * 100
+                trail_stop = max(trail_stop, current_close - (df.at[i, 'atr'] * 1.2))
+                
+                # Profit-taking rules
+                if unrealized_pct >= 3.0 or current_close < trail_stop:
+                    df.at[i, 'signal'] = 'SELL'
+                    in_position = False
+                
+                # Volatility-based emergency exit
+                if current_vol > 0.03:
+                    df.at[i, 'signal'] = 'SELL'
+                    in_position = False
 
-        print("\n🔍 Preview – Anchor Scores, Volatility & LTC Trend")
-        print(df[['timestamp', 'score_BTC', 'score_ETH', 'ltc_return', 'ltc_vol', 'ltc_trend', 'signal', 'position_size']].tail(20))
-
-        return df[['timestamp', 'signal', 'position_size']]
+        return df[['timestamp', 'signal']]
 
     except Exception as e:
-        raise RuntimeError(f"Error in generate_signals: {e}")
-
+        raise RuntimeError(f"Signal generation error: {str(e)}")
 
 def get_coin_metadata() -> dict:
     return {
         "target": {"symbol": "LTC", "timeframe": "1H"},
         "anchors": [
-            {"symbol": "BTC", "timeframe": "4H"},
-            {"symbol": "ETH", "timeframe": "4H"}
+            {"symbol": "BTC", "timeframe": "1H"},
+            {"symbol": "ETH", "timeframe": "1H"}
         ]
     }
